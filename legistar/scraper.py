@@ -32,30 +32,13 @@ class LegistarScraper (object):
     self._people_uri = (
       self.host + self.config.get('people_path', 'People.aspx'))
     
-  def searchLegislation(self, search_text, created_before=None, created_after=None, num_pages = None):
+
+  def searchLegislation(self, search_text, created_before=None, created_after=None, num_pages = None, year = None):
     """
     Submit a search query on the legislation search page, and return a list
     of summary results.
     """
-    br = self._get_new_browser()
-    br.open(self._legislation_uri)
-
-    try:
-      # Check for the link to the advanced search form
-      br.find_link(text_regex='Advanced.*')
-
-    except mechanize.LinkNotFoundError:
-      # If it's not there, then we're already on the advanced search form.
-      pass
-
-    else:
-      # If it is there, the navigate to the advanced search form.
-      br.select_form('aspnetForm')
-      data = self._data(br.form, None)
-      data['ctl00$ContentPlaceHolder1$btnSwitch'] = ''
-      data = urllib.urlencode(data)
-
-      br.open(self._legislation_uri, data)
+    br, _ = self.getAdvancedSearchForm()
 
     br.select_form('aspnetForm')
     br.form.set_all_readonly(False)
@@ -78,15 +61,19 @@ class LegistarScraper (object):
       br.form['ctl00$ContentPlaceHolder1$radFileCreated'] = [relation]
       br.form['ctl00_ContentPlaceHolder1_txtFileCreated1_dateInput_ClientState'] = '{"enabled":true,"emptyMessage":"","validationText":"%s-00-00-00","valueAsString":"%s-00-00-00","minDateStr":"1980-01-01-00-00-00","maxDateStr":"2099-12-31-00-00-00"}' % (creation_date, creation_date)
 
-
     # Submit the form
     data = self._data(br.form, None)
 
     # Return up to one million search results
     data['ctl00_ContentPlaceHolder1_lstMax_ClientState'] = '{"value":"1000000"}'
-
     data['ctl00$ContentPlaceHolder1$btnSearch'] = 'Search Legislation'
-    data['ctl00_ContentPlaceHolder1_lstYearsAdvanced_ClientState'] = '{"logEntries":[],"value":"All","text":"All Years","enabled":true,"checkedIndices":[],"checkedItemsTextOverflows":false}'
+
+
+    if year:
+      data['ctl00$ContentPlaceHolder1$lstYearsAdvanced'] = year
+      data['ctl00_ContentPlaceHolder1_lstYearsAdvanced_ClientState']='{"logEntries":[],"value":"'+year+'","text":"'+year+'","enabled":true,"checkedIndices":[],"checkedItemsTextOverflows":false}'
+    else:
+      data['ctl00_ContentPlaceHolder1_lstYearsAdvanced_ClientState'] = '{"logEntries":[],"value":"All","text":"All Years","enabled":true,"checkedIndices":[],"checkedItemsTextOverflows":false}'
 
     data = urllib.urlencode(data)
 
@@ -123,6 +110,37 @@ class LegistarScraper (object):
         all_results = True
 
     raise StopIteration
+
+  def getAdvancedSearchForm(self):
+    br = self._get_new_browser()
+    response = br.open(self._legislation_uri)
+    try:
+      br.find_link(text_regex='Advanced.*') # Check for the link to the advanced search form
+    except mechanize.LinkNotFoundError:
+      # If it's not there, then we're already on the advanced search form.
+      pass
+    else:
+      br.select_form('aspnetForm')
+      data2 = self._data(br.form, None)
+      data2['ctl00$ContentPlaceHolder1$btnSwitch'] = ''
+      data2 = urllib.urlencode(data2)
+      response = br.open(self._legislation_uri, data2) # If it is there, the navigate to the advanced search form.
+    
+    return br, response
+  
+  def getAvailableYears(self):
+    """Gets the list of years for which legislation is available"""
+    _, response = self.getAdvancedSearchForm()
+    
+    soup = BeautifulSoup(response.read())
+    years = []
+    for li in soup.find(id="ctl00_ContentPlaceHolder1_lstYearsAdvanced_DropDown").div.ul.contents:
+      if li.string.isdigit() :
+        years.append(li.string)
+        
+    return years
+
+
 
   def parseSearchResults(self, soup) :
     """Take a page of search results and return a sequence of data
