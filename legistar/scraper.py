@@ -21,9 +21,10 @@ class LegistarScraper (object):
     instance, e.g. 'phila.legistar.com'.
     """
     self.config = config
-    self.host = 'http://%s/' % self.config['hostname']
+    self.host = 'https://%s/' % self.config['hostname']
     self.fulltext = self.config['fulltext']
-
+    self.sponsor_links = self.config['sponsor_links']
+    
     # Assume that the legislation and calendar URLs are constructed regularly.
     self._legislation_uri = (
       self.host + self.config.get('legislation_path', 'Legislation.aspx'))
@@ -159,7 +160,7 @@ class LegistarScraper (object):
         legislation_id = legislation[id_key]['label']
       except TypeError:
         continue
-      legislation_url = legislation[id_key]['url']
+      legislation_url = legislation[id_key]['url'].split(self.host)[-1]
       legislation[id_key] = legislation_id
       legislation['URL'] = self.host + legislation_url.split('&Options')[0]
 
@@ -199,7 +200,7 @@ class LegistarScraper (object):
           if link is not None:
             address = self._get_link_address(link)
             if address is not None:
-              value = {'label': value, 'url': address}
+              value = {'label': value, 'url': self.host + address}
 
           data[key] = value
 
@@ -209,26 +210,32 @@ class LegistarScraper (object):
         print row
         raise e
 
+  def _lowercase_keys(self, d):
+    outp = {}
+    for k,v in d.items():
+      outp[k.lower()] = d[k]
+    return outp
+
   def expandLegislationSummary(self, summary):
     """
     Take a row as given from the searchLegislation method and retrieve the
     details of the legislation summarized by that row.
     """
-    return self.expandSummaryRow(summary, self.parseLegislationDetail)
+    return self.expandSummaryRow(self._lowercase_keys(summary), self.parseLegislationDetail)
 
   def expandHistorySummary(self, summary):
     """
     Take a row as given from the parseLegislationDetail method and retrieve the
     details of the history event summarized by that row.
     """
-    return self.expandSummaryRow(summary, self.parseHistoryDetail)
+    return self.expandSummaryRow(self._lowercase_keys(summary), self.parseHistoryDetail)
 
   def expandSummaryRow(self, summary, parse_function):
     """
     Take a row from a data table and use the URL value from that row to
     retrieve more details. Parse those details with parse_function.
     """
-    detail_uri = summary['URL']
+    detail_uri = summary['url']
 
     br = self._get_new_browser()
     connection_complete = False
@@ -268,11 +275,18 @@ class LegistarScraper (object):
     sponsors_span = soup.find('span', id='ctl00_ContentPlaceHolder1_lblSponsors2')
     sponsors = []
     if sponsors_span is not None :
-       for a in sponsors_span.findAll('a') :
-        sponsors.append(a.text)
-
+      if self.sponsor_links:
+        for a in sponsors_span.findAll('a') :
+          sponsors.append(a.text)
+      else:
+        sponsors = sponsors_span.text.split(',')
     details[u'Sponsors'] = sponsors
 
+    topics_span = soup.find('span', id='ctl00_ContentPlaceHolder1_lblIndexes2')
+    topics = []
+    if topics_span is not None :
+      topics = [topic.strip() for topic in topics_span.text.split(',')]
+    details[u'Topics'] = topics
 
     related_file_span = soup.find('span', {'id' : 'ctl00_ContentPlaceHolder1_lblRelatedFiles2' })
     if related_file_span is not None:
@@ -304,27 +318,132 @@ class LegistarScraper (object):
 
     return details, votes
 
-  def councilMembers(self) :
+  def councilMembers(self, follow_links=True) :
     br = self._get_new_browser()
     response = br.open(self._people_uri)
-    soup = BeautifulSoup(response.read())
-    table = soup.find('table', id='ctl00_ContentPlaceHolder1_gridPeople_ctl00')
-    for councilman, headers, row in self.parseDataTable(table):
 
-
-      detail_url = self.host + councilman['Person Name']['url']
-      response = br.open(detail_url)
+    # Loop through the pages, yielding each of the results
+    all_results = False
+    while all_results is False :
       soup = BeautifulSoup(response.read())
-      img = soup.find('img', {'id' : 'ctl00_ContentPlaceHolder1_imgPhoto'})
-      if img :
-        councilman['Photo'] = self.host + img['src']
+      table = soup.find('table', id='ctl00_ContentPlaceHolder1_gridPeople_ctl00')
 
-      yield councilman
+      for councilman, headers, row in self.parseDataTable(table):
+
+        if follow_links and type(councilman['Person Name']) == dict :
+          detail_url = self.host + councilman['Person Name']['url']
+          response = br.open(detail_url)
+          soup = BeautifulSoup(response.read())
+          img = soup.find('img', {'id' : 'ctl00_ContentPlaceHolder1_imgPhoto'})
+          if img :
+            councilman['Photo'] = self.host + img['src']
+
+        yield councilman
+
+      current_page = soup.fetch('a', {'class': 'rgCurrentPage'})
+      if current_page :
+        current_page = current_page[0]
+        next_page = current_page.findNextSibling('a')
+      else :
+        next_page = None
+
+      if next_page :
+        print 'reading page', next_page.text
+        print
+        event_target = next_page['href'].split("'")[1]
+        br.select_form('aspnetForm')
+        data = self._data(br.form, event_target)
+
+        del data['ctl00$ContentPlaceHolder1$gridPeople$ctl00$ctl02$ctl01$ctl01']
+        # print data
+        data = urllib.urlencode(data)
+        response = _try_connect(br, self._people_uri, data)
+
+      else :
+        all_results = True
+
+    raise StopIteration
+
+  def councilCalendar(self, search_type='upcoming') :
+    br = self._get_new_browser()
+    br.open(self._calendar_uri)
+
+    if search_type == 'all' : 
+      print 'Scraping all event data'
+      br.select_form('aspnetForm')
+
+      br.form.set_all_readonly(False)
+      data = self._data(br.form, 'ctl00$ContentPlaceHolder1$lstYears')
+      
+      # delete extraneous form values
+      del data[None]
+      del data['ctl00$ContentPlaceHolder1$gridCalendar$ctl00$ctl02$ctl01$ctl02']
+      del data['ctl00$ContentPlaceHolder1$gridCalendar$ctl00$ctl02$ctl01$ctl04']
+
+      # search for all years
+      data['ctl00$ContentPlaceHolder1$lstYears'] = 'All Years'
+      data['ctl00_ContentPlaceHolder1_lstYears_ClientState'] = '{"logEntries":[],"value":"All","text":"All Years","enabled":true,"checkedIndices":[],"checkedItemsTextOverflows":false}'
+
+      data = urllib.urlencode(data)
+      response = _try_connect(br, self._calendar_uri, data)
+
+    else :
+      response = br.open(self._calendar_uri)
 
 
+    # Loop through the pages, yielding each of the results
+    all_results = False
+    while all_results is False :
+      soup = BeautifulSoup(response.read())
 
+      table = soup.find('table', id='ctl00_ContentPlaceHolder1_gridCalendar_ctl00')
+      for event, headers, row in self.parseDataTable(table):
 
+        if type(event['Agenda']) == dict :
+          detail_url = event['Agenda']['url']
+          if self.fulltext :
+            event['Agenda']['fulltext'] = self._extractPdfText(detail_url)
+          else:
+            event['Agenda']['fulltext'] = ''
 
+        if type(event['Minutes']) == dict :
+          detail_url = event['Minutes']['url']
+          if self.fulltext :
+            event['Minutes']['fulltext'] = self._extractPdfText(detail_url)
+          else:
+            event['Minutes']['fulltext'] = ''
+
+        yield event
+
+      current_page = soup.fetch('a', {'class': 'rgCurrentPage'})
+      if current_page :
+        current_page = current_page[0]
+        next_page = current_page.findNextSibling('a')
+      else :
+        next_page = None
+
+      if next_page :
+        print 'reading page', next_page.text
+        print
+        event_target = next_page['href'].split("'")[1]
+        br.select_form('aspnetForm')
+        data = self._data(br.form, event_target)
+        
+        del data[None]
+        del data['ctl00$ContentPlaceHolder1$gridCalendar$ctl00$ctl02$ctl01$ctl02']
+        del data['ctl00$ContentPlaceHolder1$gridCalendar$ctl00$ctl02$ctl01$ctl04']
+        del data['ctl00$ContentPlaceHolder1$chkOptions$1']
+        del data['ctl00$ButtonRSS']
+
+        data = urllib.urlencode(data)
+        response = _try_connect(br, self._calendar_uri, data)
+
+      else :
+        all_results = True
+
+    raise StopIteration
+    
+    
   def _get_general_details(self, detail_div, label_suffix='', value_suffix='2'):
     """
     Parse the data in the top section of a detail page.
@@ -452,6 +571,28 @@ class LegistarScraper (object):
     # Otherwise, we don't know how to find the address.
     return None
 
+  def _switch_to_advanced_search(self, br) :
+    br.select_form('aspnetForm')
+    data = self._data(br.form, 'ctl00$ContentPlaceHolder1$btnSwitch')
+    data['__EVENTARGUMENT'] = ''
+    data['ctl00_tabTop_ClientState'] = '{"selectedIndexes":["2"],"logEntries":[],"scrollState":{}}'
+    data['ctl00_RadScriptManager1_TSM'] = ';;System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35:en-US:89093640-ae6b-44c3-b8ea-010c934f8924:ea597d4b:b25378d2;Telerik.Web.UI, Version=2012.2.912.40, Culture=neutral, PublicKeyToken=121fae78165ba3d4:en-US:6aabe639-e731-432d-8e00-1a2e36f6eee0:16e4e7cd:f7645509:24ee1bba:e330518b:1e771326:8e6f0d33:ed16cbdc:f46195d3:19620875:874f8ea2:39040b5c:f85f9819:2003d0b8:aa288e2d:c8618e41:58366029'
+
+    data = urllib.urlencode(data)
+    response = br.open(self._legislation_uri, data)
+
+    try:
+      # Check for the link to the advanced search form
+      br.find_link(text_regex='.*Simple.*')
+
+    except mechanize.LinkNotFoundError:
+      # If it's not there, then we're already on the advanced search form.
+      raise ValueError('Not on the advanced search page')
+
+
+    return br
+
+
 def _try_connect(br, uri, data=None) :
   response = False
   for attempt in xrange(1,6):
@@ -469,5 +610,3 @@ def _try_connect(br, uri, data=None) :
   else :
     print uri
     raise urllib2.URLError("Timed Out")
-
-

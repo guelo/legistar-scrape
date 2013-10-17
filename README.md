@@ -4,6 +4,7 @@ Legistar Scraper is a python library for scraping [Legistar sites](http://www.gr
 Legistar sites include 
 - [Chicago](http://chicago.legistar.com)
 - [Philadelphia](http://phila.legistar.com)
+- [Oakland](http://oakland.legistar.com/legislation.aspx)
 - and many other cities
 
 This software is under active development. It is currently known to work for Chicago and Philadelphia.
@@ -19,7 +20,33 @@ This software is under active development. It is currently known to work for Chi
 Note: The current stable branch of mechanize [has a bug in it](https://github.com/jjlee/mechanize/pull/58). If
 you are installing the dependencies by hand, use https://github.com/abielr/mechanize.
 
+# Tests
+
+To run all unit tests:
+
+```
+nosetests
+```
+
+To run a single test:
+
+```
+nosetests tests/test_legistar_scraper.py:name_of_test
+```
+
+For example, if you wanted to test just the council members pagination
+
+```
+nosetests tests/test_legistar_scraper.py:paging_through_council_members
+```
+
 # Example usage
+
+* powering [Councilmatic](https://github.com/codeforamerica/councilmatic/blob/master/councilmatic/phillyleg/management/scraper_wrappers/sources/hosted_legistar_scraper.py)
+* [saving council agendas in to MongoDB](https://github.com/opengovernment/legistar-scrape)
+* [saving councilmembers to a CSV](https://github.com/datamade/legistar-people)
+
+## Sample script
 
 ```python
 from legistar.scraper import LegistarScraper
@@ -58,4 +85,24 @@ for legislation_summary in all_legislation:
 
 for history_summary in legislation_history:
   (history_detail, votes) = scraper.expandHistorySummary(history_summary)
+
+#__________________________________________________________________________
+#
+# Get a list of all council members
+
+
+councilmembers = scraper.councilMembers()
+
+#__________________________________________________________________________
+#
+# Get a list of all upcoming agendas
+
+councilmembers = scraper.councilCalendar()
+
+#__________________________________________________________________________
+#
+# Get a list of all agendas (including past ones)
+
+councilmembers = scraper.councilCalendar('all')
+
 ```
